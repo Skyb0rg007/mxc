@@ -15,6 +15,7 @@ use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::lxc_common::signal_cleanup;
 use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::logger::Logger;
@@ -800,6 +801,9 @@ impl ProxyNetworkNamespace {
         set_nonblocking(liveness_reader.as_raw_fd())?;
 
         let mut command = Command::new("unshare");
+        // The supervisor's TERM/INT trap, which stops slirp4netns, can only
+        // run if those signals are not left blocked by the watchdog.
+        signal_cleanup::unblock_in_child(&mut command);
         command
             .args([
                 "--user",
