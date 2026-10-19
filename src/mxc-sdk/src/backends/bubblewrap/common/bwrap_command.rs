@@ -34,8 +34,8 @@ pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 /// Notes:
 /// - Missing paths are silently skipped because the runner emits these
 ///   via `--ro-bind-try` (e.g. `/lib32` does not exist on x86_64-only
-///   systems; `/run/systemd/resolve` does not exist on hosts without
-///   systemd-resolved).
+///   systems; `/run/systemd/resolve/stub-resolv.conf` does not exist on
+///   hosts without systemd-resolved).
 /// - On merged-usr distros (modern Debian, Ubuntu, Fedora, Arch) the
 ///   top-level `/bin`, `/sbin`, `/lib*` entries are symlinks pointing
 ///   under `/usr`. `bwrap` follows the source-side symlink, so the
@@ -46,9 +46,18 @@ pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 ///   explicitly in `readonlyPaths`.
 /// - We deliberately do NOT bind `/run` wholesale: `/run/user/<uid>`
 ///   holds the caller's D-Bus session socket, keyring sockets, and
-///   ssh-agent socket. We only bind the well-known DNS stub-resolver
-///   directories so the resolver file is *readable* when `/etc/resolv.conf`
-///   is a symlink (the default on systemd-resolved hosts).
+///   ssh-agent socket. We only bind the well-known resolver files under it
+///   so the resolver file is *readable* when `/etc/resolv.conf` is a symlink
+///   (the default on systemd-resolved hosts).
+/// - Those are files, not their directories, because the directories also
+///   hold the resolver daemons' sockets. `/run/systemd/resolve` contains
+///   systemd-resolved's varlink API (`io.systemd.Resolve`), and a socket
+///   stays connectable through a read-only bind. Binding the directory let
+///   a sandbox with no network ask the host's resolver to look names up --
+///   a DNS channel out of the sandbox that no `network` policy can close.
+///   The cost is that a file bind is a snapshot: the resolver daemons
+///   replace these files by rename, so a running sandbox keeps the resolver
+///   configuration it started with.
 /// - To keep that file readable when `/etc/resolv.conf` points *outside*
 ///   those dirs, we also synthesise a `/var/run -> /run` compat symlink (for
 ///   `/var/run/...`-routed targets — older RHEL/CentOS-era and some
@@ -88,13 +97,16 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     // System configuration (ld.so config, certs, resolv.conf, hosts,
     // passwd, group, machine-id, …). See module-level note on DAC.
     "/etc",
-    // DNS stub-resolver directories. /etc/resolv.conf is usually a
-    // symlink into one of these on modern Linux distros (systemd-resolved
-    // / NetworkManager / resolvconf). We bind the narrow subdirectories
-    // rather than all of /run to avoid exposing /run/user/<uid>.
-    "/run/systemd/resolve",
-    "/run/NetworkManager",
-    "/run/resolvconf",
+    // Resolver files. /etc/resolv.conf is usually a symlink to one of these
+    // on modern Linux distros (systemd-resolved / NetworkManager /
+    // resolvconf). We bind the files alone, not all of /run (which would
+    // expose /run/user/<uid>) nor their directories (which would expose the
+    // resolver daemons' sockets; see above).
+    "/run/systemd/resolve/stub-resolv.conf",
+    "/run/systemd/resolve/resolv.conf",
+    "/run/NetworkManager/resolv.conf",
+    "/run/NetworkManager/no-stub-resolv.conf",
+    "/run/resolvconf/resolv.conf",
     // WSL generates its resolv.conf here and points /etc/resolv.conf at
     // it. Bind just this single file (not /mnt) so DNS works under WSL
     // without exposing the Windows drive mounts. Skipped on non-WSL hosts
@@ -1599,17 +1611,19 @@ mod tests {
         }
     }
 
-    /// DNS stub-resolver dirs must be in the baseline so an `/etc/resolv.conf`
+    /// The resolver files must be in the baseline so an `/etc/resolv.conf`
     /// symlink has a target to resolve to. Emitted via `--ro-bind-try` so hosts
     /// without systemd-resolved / NetworkManager / resolvconf still build a
     /// valid argument vector.
     #[test]
-    fn baseline_includes_dns_stub_resolver_dirs() {
+    fn baseline_includes_resolver_files() {
         let args = build_args(&base_request(), None);
         for path in [
-            "/run/systemd/resolve",
-            "/run/NetworkManager",
-            "/run/resolvconf",
+            "/run/systemd/resolve/stub-resolv.conf",
+            "/run/systemd/resolve/resolv.conf",
+            "/run/NetworkManager/resolv.conf",
+            "/run/NetworkManager/no-stub-resolv.conf",
+            "/run/resolvconf/resolv.conf",
         ] {
             let found = args
                 .windows(3)
@@ -1627,8 +1641,8 @@ mod tests {
     /// symlink case (older RHEL/CentOS-era, some container images). We never
     /// mount `/var`, so without a `/var/run -> /run` compat symlink the
     /// target dangles and DNS silently breaks. Assert the symlink is emitted
-    /// so `/var/run/NetworkManager/resolv.conf` resolves into the bound
-    /// `/run/NetworkManager`.
+    /// so `/var/run/NetworkManager/resolv.conf` resolves to the bound
+    /// `/run/NetworkManager/resolv.conf`.
     #[test]
     fn baseline_recreates_var_run_compat_symlink() {
         let args = build_args(&base_request(), None);

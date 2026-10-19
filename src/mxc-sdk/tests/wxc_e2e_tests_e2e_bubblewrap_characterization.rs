@@ -321,3 +321,49 @@ fn bubblewrap_timeout_is_enforced() {
          descendant; took {elapsed:?}"
     );
 }
+
+/// Locks in that a sandbox with no network cannot reach the host's resolver
+/// daemon.
+///
+/// systemd-resolved serves lookups over a socket in `/run/systemd/resolve`,
+/// the directory `/etc/resolv.conf` usually points into. A sandbox that can
+/// connect to it has the host resolve names on its behalf, which is a DNS
+/// channel out of a sandbox whose policy grants it no network at all.
+#[test]
+fn bubblewrap_without_network_cannot_reach_the_host_resolver_daemon() {
+    const RESOLVED_SOCKET: &str = "/run/systemd/resolve/io.systemd.Resolve";
+    if !ready() {
+        return;
+    }
+    // The control: without a reachable daemon on the host, an unreachable one
+    // in the sandbox proves nothing.
+    if std::os::unix::net::UnixStream::connect(RESOLVED_SOCKET).is_err() {
+        println!("SKIPPED: no systemd-resolved socket to reach at {RESOLVED_SOCKET}");
+        return;
+    }
+    let result = run_platform_config_value(
+        "bwrap resolver daemon",
+        &config(
+            "resolver-daemon",
+            &format!(
+                "command -v python3 >/dev/null || {{ echo MXC_NO_PYTHON; exit 0; }}; \
+                 if python3 -c 'import socket; \
+                 socket.socket(socket.AF_UNIX).connect(\"{RESOLVED_SOCKET}\")' 2>/dev/null; \
+                 then echo MXC_RESOLVER_REACHED; else echo MXC_RESOLVER_UNREACHABLE; fi"
+            ),
+        ),
+        &[],
+        None,
+    );
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let out = result.combined_output();
+    if out.contains("MXC_NO_PYTHON") {
+        println!("SKIPPED: the sandbox has no python3 to open a Unix socket with");
+        return;
+    }
+    assert!(
+        out.contains("MXC_RESOLVER_UNREACHABLE"),
+        "a sandbox with no network reached the host's resolver daemon at \
+         {RESOLVED_SOCKET}, so it can still resolve names through the host. Output:\n{out}"
+    );
+}
