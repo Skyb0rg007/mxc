@@ -103,6 +103,18 @@ if [ -f "$NSSWITCH_PATH" ]; then
     fi
 fi
 
+# glibc asks nscd before it reads that chain at all, and nscd answers from the
+# host's configuration -- its socket is a path, which a network namespace does
+# not hide. NixOS runs it by default. Hide the socket so lookups here take the
+# pinned chain. The sandbox baseline never binds /run/nscd.
+NSCD_DIR="$(readlink -f /var/run/nscd || true)"
+if [ -n "$NSCD_DIR" ] && [ -d "$NSCD_DIR" ]; then
+    if ! mount -t tmpfs tmpfs "$NSCD_DIR"; then
+        echo "FAIL: could not hide the host's nscd socket at $NSCD_DIR."
+        exit 1
+    fi
+fi
+
 # Without this the stub address is unreachable and the peer cannot be bound.
 ip link set lo up
 
